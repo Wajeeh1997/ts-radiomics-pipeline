@@ -1,0 +1,11 @@
+idc-index
+pydicom
+SimpleITK
+rt_utils
+pyradiomics
+pandas
+numpy
+scikit-learn
+matplotlib
+openpyxl
+tabulate

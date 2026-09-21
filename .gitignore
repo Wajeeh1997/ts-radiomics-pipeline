@@ -1,0 +1,17 @@
+# Never commit patient imaging data or derived intermediate files
+data/
+outputs/converted/
+
+# Virtual environment
+sts_env/
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
