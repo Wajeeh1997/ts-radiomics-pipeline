@@ -44,20 +44,24 @@ def main():
 
     df = df.rename(columns={config.PATIENT_ID_COL: "PatientID"})
 
-    # Outcome may be coded as text (e.g. "yes"/"no", "M+"/"M-") or 0/1 — normalize.
-    outcome = df[config.OUTCOME_COL]
-    if outcome.dtype == object:
-        outcome = outcome.astype(str).str.strip().str.lower()
-        positive_tokens = {"yes", "y", "1", "true", "m+", "positive", "pos"}
-        outcome = outcome.isin(positive_tokens).astype(int)
-    else:
-        outcome = outcome.fillna(0).astype(int)
-    df["Outcome"] = outcome
+    # This dataset's outcome column is free text mixing recurrence and metastasis
+    # events at different sites (e.g. "Mets - lungs", "Recurrence - regional",
+    # "--" for no event). We define the target as lung metastasis specifically,
+    # matching the original thesis outcome, and drop patients with no recorded
+    # follow-up (NaN) rather than counting them as negative.
+    raw = df[config.OUTCOME_COL].astype(str).str.strip().str.lower()
+    before = len(df)
+    known_mask = df[config.OUTCOME_COL].notna()
+    df = df[known_mask].copy()
+    raw = raw[known_mask]
+    print(f"\nDropped {before - len(df)} patients with no recorded outcome.")
+
+    df["Outcome"] = raw.str.contains("lung", na=False).astype(int)
 
     print(f"\nOutcome distribution: {df['Outcome'].value_counts().to_dict()}")
     if df["Outcome"].nunique() < 2:
         print("WARNING: outcome column has only one class after encoding — "
-              "double-check config.OUTCOME_COL and the positive_tokens mapping above.")
+              "double-check config.OUTCOME_COL and the outcome logic above.")
 
     # Keep remaining columns as clinical covariates; one-hot encode categoricals,
     # median-impute numerics.

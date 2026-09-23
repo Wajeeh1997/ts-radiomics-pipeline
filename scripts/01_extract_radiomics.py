@@ -10,6 +10,7 @@ Usage:
     python scripts/01_extract_radiomics.py
 """
 import sys
+import traceback
 from pathlib import Path
 import logging
 
@@ -26,13 +27,18 @@ from radiomics import featureextractor
 logging.getLogger("radiomics").setLevel(logging.ERROR)
 
 
-def build_extractor(bin_width):
+def build_extractor(bin_width=None, bin_count=None):
     settings = {
-        "binWidth": bin_width,
         "resampledPixelSpacing": list(config.RESAMPLE_SPACING),
         "interpolator": sitk.sitkBSpline,
         "normalize": False,
+        "preCrop": True,
+        "padDistance": 10,
     }
+    if bin_count is not None:
+        settings["binCount"] = bin_count
+    else:
+        settings["binWidth"] = bin_width
     extractor = featureextractor.RadiomicsFeatureExtractor(**settings)
     extractor.disableAllImageTypes()
     extractor.enableImageTypeByName("Original")
@@ -43,7 +49,6 @@ def build_extractor(bin_width):
     extractor.enableAllFeatures()
     return extractor
 
-
 def read_series_as_image(dicom_dir):
     reader = sitk.ImageSeriesReader()
     file_names = reader.GetGDCMSeriesFileNames(str(dicom_dir))
@@ -51,8 +56,36 @@ def read_series_as_image(dicom_dir):
     return reader.Execute()
 
 
+def series_uid_of_dir(dicom_dir):
+    """Read SeriesInstanceUID from the first .dcm file in a folder."""
+    dcm_files = list(Path(dicom_dir).glob("*.dcm"))
+    if not dcm_files:
+        return None
+    ds = pydicom.dcmread(dcm_files[0], stop_before_pixels=True)
+    return getattr(ds, "SeriesInstanceUID", None)
+
+
+def rtstruct_referenced_series_uid(rt_path):
+    """Pull the SeriesInstanceUID an RTSTRUCT file's contours are drawn on."""
+    ds = pydicom.dcmread(rt_path, stop_before_pixels=True)
+    try:
+        return (ds.ReferencedFrameOfReferenceSequence[0]
+                  .RTReferencedStudySequence[0]
+                  .RTReferencedSeriesSequence[0]
+                  .SeriesInstanceUID)
+    except Exception:
+        pass
+    try:
+        roi_contour = ds.ROIContourSequence[0]
+        contour = roi_contour.ContourSequence[0]
+        ref_sop_uid = contour.ContourImageSequence[0].ReferencedSOPInstanceUID
+        return ("SOP", ref_sop_uid)
+    except Exception:
+        return None
+
+
 def find_roi_mask(rtstruct_dir, ct_dir):
-    """Return (mask_array_zyx, reference_image) or (None, None) if no matching ROI."""
+    """Return (mask_array_zyx, roi_name) or (None, None) if no matching ROI."""
     dcm_files = list(Path(rtstruct_dir).glob("*.dcm"))
     if not dcm_files:
         return None, None
@@ -69,8 +102,6 @@ def find_roi_mask(rtstruct_dir, ct_dir):
     roi_names = rtstruct.get_roi_names()
     match = next((n for n in roi_names if n in config.ROI_NAME_CANDIDATES), None)
     if match is None:
-        # fall back to the first ROI if none of our candidates matched —
-        # this dataset generally has a single tumor contour per patient
         match = roi_names[0] if roi_names else None
     if match is None:
         return None, None
@@ -97,9 +128,8 @@ def main():
         sys.exit(1)
 
     idx = pd.read_csv(config.SERIES_INDEX_CSV)
-    ct_extractor = build_extractor(config.CT_BIN_WIDTH)
-    pet_extractor = build_extractor(config.PET_BIN_WIDTH)
-
+    ct_extractor = build_extractor(bin_width=config.CT_BIN_WIDTH)
+    pet_extractor = build_extractor(bin_count=config.PET_BIN_COUNT)
     rows = []
     patients = sorted(idx["PatientID"].unique())
     print(f"Processing {len(patients)} patients...")
@@ -116,8 +146,34 @@ def main():
             print(f"    [skip] missing CT or RTSTRUCT for {pid}")
             continue
 
-        ct_dir = ct_rows.iloc[0]["dir"]
-        rt_dir = rt_rows.iloc[0]["dir"]
+        # This dataset has multiple RTSTRUCT files per patient, each drawn on a
+        # different reference series (CT, PET, or various MR series). We need
+        # the one drawn on CT, so we check each RTSTRUCT's referenced series
+        # UID against each candidate CT series until we find a match.
+        rt_dir = None
+        ct_dir = None
+        for _, ct_r in ct_rows.iterrows():
+            candidate_ct_dir = ct_r["dir"]
+            candidate_ct_uid = series_uid_of_dir(candidate_ct_dir)
+            for _, rt_r in rt_rows.iterrows():
+                candidate_rt_dir = rt_r["dir"]
+                rt_file = next(Path(candidate_rt_dir).glob("*.dcm"), None)
+                if rt_file is None:
+                    continue
+                ref_uid = rtstruct_referenced_series_uid(rt_file)
+                if isinstance(ref_uid, tuple):
+                    continue
+                if ref_uid == candidate_ct_uid:
+                    rt_dir = candidate_rt_dir
+                    ct_dir = candidate_ct_dir
+                    break
+            if rt_dir is not None:
+                break
+
+        if rt_dir is None or ct_dir is None:
+            print(f"    [skip] no RTSTRUCT found that references any CT series for {pid} "
+                  f"({len(ct_rows)} CT series, {len(rt_rows)} RTSTRUCT files checked)")
+            continue
 
         try:
             ct_img = read_series_as_image(ct_dir)
@@ -142,8 +198,9 @@ def main():
             for k, v in ct_feats.items():
                 if not k.startswith("diagnostics_"):
                     row[f"CT_{k}"] = float(v)
-        except Exception as e:
-            print(f"    [warn] CT extraction failed for {pid}: {e}")
+        except Exception:
+            print(f"    [warn] CT extraction failed for {pid}:")
+            print(traceback.format_exc())
 
         if not pt_rows.empty:
             pt_dir = pt_rows.iloc[0]["dir"]
@@ -154,8 +211,9 @@ def main():
                 for k, v in pet_feats.items():
                     if not k.startswith("diagnostics_"):
                         row[f"PET_{k}"] = float(v)
-            except Exception as e:
-                print(f"    [warn] PET extraction failed for {pid}: {e}")
+            except Exception:
+                print(f"    [warn] PET extraction failed for {pid}:")
+                print(traceback.format_exc())
 
         rows.append(row)
 
