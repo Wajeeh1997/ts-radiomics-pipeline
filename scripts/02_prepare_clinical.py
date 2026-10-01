@@ -65,7 +65,27 @@ def main():
 
     # Keep remaining columns as clinical covariates; one-hot encode categoricals,
     # median-impute numerics.
-    covariate_cols = [c for c in df.columns if c not in ("PatientID", config.OUTCOME_COL, "Outcome")]
+    #
+    # IMPORTANT: exclude columns that are only known *after* the outcome occurs.
+    # "Time - diagnosis to outcome (days)" only has a real value for patients
+    # who had SOME event — patients with no event get "--", which one-hot
+    # encodes into a column that's effectively a disguised copy of "did this
+    # patient have any event at all". "Status (NED, AWD, D)" and "Time -
+    # diagnosis to last follow-up (days)" are similarly outcome-adjacent.
+    # Including these leaks outcome information into the "clinical" predictors
+    # and inflates the clinical-only AUC artificially.
+    LEAKY_COLS = [
+        "Time – diagnosis to outcome (days)",
+        "Status (NED, AWD, D)",
+        "Time – diagnosis to last follow-up (days)",
+    ]
+    covariate_cols = [c for c in df.columns
+                       if c not in ("PatientID", config.OUTCOME_COL, "Outcome")
+                       and c not in LEAKY_COLS]
+    dropped_leaky = [c for c in LEAKY_COLS if c in df.columns]
+    if dropped_leaky:
+        print(f"\nExcluded as outcome-leaking covariates: {dropped_leaky}")
+
     clean = df[["PatientID", "Outcome"] + covariate_cols].copy()
 
     for col in covariate_cols:

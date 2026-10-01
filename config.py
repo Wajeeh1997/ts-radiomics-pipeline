@@ -48,7 +48,7 @@ OUTCOME_COL = "Outcome (recurrence, mets)"
 RANDOM_STATE = 42
 OUTER_FOLDS = 5
 INNER_FOLDS = 4   # smaller inner fold count than the HECKTOR version — this cohort is only 51 patients
-N_PERMUTATIONS = 100
+N_PERMUTATIONS = 1000
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CONVERTED_DIR.mkdir(parents=True, exist_ok=True)
